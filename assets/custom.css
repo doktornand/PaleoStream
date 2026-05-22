@@ -1,0 +1,22 @@
+/* Scadassembler v2.0 - Custom CSS */
+
+/* Animation pulse pour les badges */
+@keyframes pulse-glow {
+    0%, 100% { box-shadow: 0 0 5px #e94560; }
+    50% { box-shadow: 0 0 20px #e94560, 0 0 40px #e94560; }
+}
+
+.badge-scada {
+    animation: pulse-glow 2s infinite;
+}
+
+/* Transition fluide */
+* {
+    transition: background-color 0.3s, border-color 0.3s;
+}
+
+/* Selection de texte */
+::selection {
+    background: #e94560;
+    color: white;
+}

@@ -6,6 +6,145 @@ import streamlit as st
 from utils.styling import apply_custom_styling, render_header
 import time
 
+
+# ============================================================
+# Fonctions de conversion (définies avant leur utilisation)
+# ============================================================
+
+def convert_asm(source: str, target_format: str, scada_mode: bool, keep_comments: bool) -> str:
+    """Convertit le code ASM 16-bit en 32-bit"""
+    lines = source.split("\n")
+    output = []
+
+    # Header
+    output.append("; ============================================")
+    output.append("; Genere par Scadassembler v2.0")
+    output.append("; Source: MS-DOS 16-bit")
+    output.append("; Cible: Win32 MASM")
+    output.append("; ============================================")
+    output.append("")
+    output.append(".386")
+    output.append(".MODEL FLAT, STDCALL")
+    output.append("OPTION CASEMAP:NONE")
+    output.append("")
+
+    # Prototypes
+    output.append("; Prototypes Win32")
+    output.append("ExitProcess PROTO :DWORD")
+    output.append("GetStdHandle PROTO :DWORD")
+    output.append("WriteConsoleA PROTO :DWORD, :DWORD, :DWORD, :DWORD, :DWORD")
+    output.append("ReadConsoleA PROTO :DWORD, :DWORD, :DWORD, :DWORD, :DWORD")
+
+    if scada_mode and any("in al," in l.lower() or "out " in l.lower() for l in lines):
+        output.append("CreateFileA PROTO :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD")
+        output.append("ReadFile PROTO :DWORD, :DWORD, :DWORD, :DWORD, :DWORD")
+        output.append("WriteFile PROTO :DWORD, :DWORD, :DWORD, :DWORD, :DWORD")
+
+    output.append("")
+    output.append("STD_OUTPUT_HANDLE EQU -11")
+    output.append("STD_INPUT_HANDLE EQU -10")
+    output.append("")
+
+    # Data section
+    output.append(".data")
+    output.append("    bytesWritten DWORD ?")
+    output.append("    bytesRead DWORD ?")
+    output.append("    hConsoleOutput HANDLE ?")
+    output.append("    hConsoleInput HANDLE ?")
+    output.append("")
+
+    # Convert data items
+    for line in lines:
+        if "DB" in line and not any(x in line for x in [".CODE", ".STACK"]):
+            converted = line.replace("$", "0")
+            output.append("    " + converted.strip())
+
+    output.append("")
+
+    # Code section
+    output.append(".code")
+    output.append("")
+    output.append("main PROC")
+    output.append("    ; Initialisation console")
+    output.append("    invoke GetStdHandle, STD_OUTPUT_HANDLE")
+    output.append("    mov hConsoleOutput, eax")
+    output.append("    invoke GetStdHandle, STD_INPUT_HANDLE")
+    output.append("    mov hConsoleInput, eax")
+    output.append("")
+
+    # Convert code
+    for line in lines:
+        trimmed = line.strip()
+
+        if not trimmed or trimmed.startswith(";"):
+            if keep_comments:
+                output.append("    " + trimmed)
+            continue
+
+        if "int 21h" in trimmed.lower() or "INT 21H" in trimmed:
+            if "09h" in trimmed or "09H" in trimmed:
+                output.append("    ; [CONVERTED] INT 21h AH=09h -> WriteConsoleA")
+                output.append("    invoke WriteConsoleA, hConsoleOutput, ADDR msg, 13, ADDR bytesWritten, NULL")
+            elif "4C" in trimmed:
+                output.append("    ; [CONVERTED] INT 21h AH=4Ch -> ExitProcess")
+                output.append("    invoke ExitProcess, 0")
+            elif "3Dh" in trimmed:
+                output.append("    ; [CONVERTED] INT 21h AH=3Dh -> CreateFileA")
+                output.append("    invoke CreateFileA, ADDR filename, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL")
+            elif "3Fh" in trimmed:
+                output.append("    ; [CONVERTED] INT 21h AH=3Fh -> ReadFile")
+                output.append("    invoke ReadFile, ebx, ADDR buffer, 100, ADDR bytesRead, NULL")
+            elif "40h" in trimmed:
+                output.append("    ; [CONVERTED] INT 21h AH=40h -> WriteFile")
+                output.append("    invoke WriteFile, ebx, ADDR buffer, 100, ADDR bytesWritten, NULL")
+            elif "3Eh" in trimmed:
+                output.append("    ; [CONVERTED] INT 21h AH=3Eh -> CloseHandle")
+                output.append("    invoke CloseHandle, ebx")
+            else:
+                output.append("    ; MANUAL_REVIEW_REQUIRED: " + trimmed)
+        elif "in al," in trimmed.lower():
+            output.append("    ; [SCADA] Port I/O detecte")
+            output.append("    ; MANUAL_REVIEW_REQUIRED: " + trimmed)
+        elif "out " in trimmed.lower():
+            output.append("    ; [SCADA] Port I/O detecte")
+            output.append("    ; MANUAL_REVIEW_REQUIRED: " + trimmed)
+        elif any(d in trimmed for d in [".MODEL", ".STACK", ".CODE", ".DATA", "END"]):
+            output.append("    ; [REMOVED] " + trimmed)
+        elif any(r in trimmed for r in ["AX", "BX", "CX", "DX", "SI", "DI", "BP", "SP"]) and "EAX" not in trimmed:
+            converted = trimmed
+            converted = converted.replace("AX", "EAX").replace("BX", "EBX")
+            converted = converted.replace("CX", "ECX").replace("DX", "EDX")
+            converted = converted.replace("SI", "ESI").replace("DI", "EDI")
+            converted = converted.replace("BP", "EBP").replace("SP", "ESP")
+            output.append("    " + converted)
+        else:
+            output.append("    " + trimmed)
+
+    output.append("")
+    output.append("    invoke ExitProcess, 0")
+    output.append("main ENDP")
+    output.append("END main")
+
+    return "\n".join(output)
+
+
+def count_transformations(source: str) -> int:
+    """Compte les transformations appliquees"""
+    count = 0
+    if "int 21h" in source.lower():
+        count += source.lower().count("int 21h")
+    if any(r in source for r in ["AX", "BX", "CX", "DX"]):
+        count += 1
+    return count
+
+
+def count_manual_reviews(converted: str) -> int:
+    """Compte les reviews manuelles requises"""
+    return converted.count("MANUAL_REVIEW_REQUIRED")
+
+
+# ============================================================
+
 st.set_page_config(
     page_title="Conversion | Scadassembler",
     page_icon="⚙️",
@@ -199,133 +338,5 @@ if st.session_state.conversion_result:
         if st.button("📊 Voir le rapport", use_container_width=True):
             st.switch_page("pages/3_📊_Rapport_et_Métriques.py")
 
-# Fonctions de conversion
-
-def convert_asm(source: str, target_format: str, scada_mode: bool, keep_comments: bool) -> str:
-    """Convertit le code ASM 16-bit en 32-bit"""
-    lines = source.split("\n")
-    output = []
-
-    # Header
-    output.append("; ============================================")
-    output.append("; Genere par Scadassembler v2.0")
-    output.append("; Source: MS-DOS 16-bit")
-    output.append("; Cible: Win32 MASM")
-    output.append("; ============================================")
-    output.append("")
-    output.append(".386")
-    output.append(".MODEL FLAT, STDCALL")
-    output.append("OPTION CASEMAP:NONE")
-    output.append("")
-
-    # Prototypes
-    output.append("; Prototypes Win32")
-    output.append("ExitProcess PROTO :DWORD")
-    output.append("GetStdHandle PROTO :DWORD")
-    output.append("WriteConsoleA PROTO :DWORD, :DWORD, :DWORD, :DWORD, :DWORD")
-    output.append("ReadConsoleA PROTO :DWORD, :DWORD, :DWORD, :DWORD, :DWORD")
-
-    if scada_mode and any("in al," in l.lower() or "out " in l.lower() for l in lines):
-        output.append("CreateFileA PROTO :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD")
-        output.append("ReadFile PROTO :DWORD, :DWORD, :DWORD, :DWORD, :DWORD")
-        output.append("WriteFile PROTO :DWORD, :DWORD, :DWORD, :DWORD, :DWORD")
-
-    output.append("")
-    output.append("STD_OUTPUT_HANDLE EQU -11")
-    output.append("STD_INPUT_HANDLE EQU -10")
-    output.append("")
-
-    # Data section
-    output.append(".data")
-    output.append("    bytesWritten DWORD ?")
-    output.append("    bytesRead DWORD ?")
-    output.append("    hConsoleOutput HANDLE ?")
-    output.append("    hConsoleInput HANDLE ?")
-    output.append("")
-
-    # Convert data items
-    for line in lines:
-        if "DB" in line and not any(x in line for x in [".CODE", ".STACK"]):
-            converted = line.replace("$", "0")
-            output.append("    " + converted.strip())
-
-    output.append("")
-
-    # Code section
-    output.append(".code")
-    output.append("")
-    output.append("main PROC")
-    output.append("    ; Initialisation console")
-    output.append("    invoke GetStdHandle, STD_OUTPUT_HANDLE")
-    output.append("    mov hConsoleOutput, eax")
-    output.append("    invoke GetStdHandle, STD_INPUT_HANDLE")
-    output.append("    mov hConsoleInput, eax")
-    output.append("")
-
-    # Convert code
-    for line in lines:
-        trimmed = line.strip()
-
-        if not trimmed or trimmed.startswith(";"):
-            if keep_comments:
-                output.append("    " + trimmed)
-            continue
-
-        if "int 21h" in trimmed.lower() or "INT 21H" in trimmed:
-            if "09h" in trimmed or "09H" in trimmed:
-                output.append("    ; [CONVERTED] INT 21h AH=09h -> WriteConsoleA")
-                output.append("    invoke WriteConsoleA, hConsoleOutput, ADDR msg, 13, ADDR bytesWritten, NULL")
-            elif "4C" in trimmed:
-                output.append("    ; [CONVERTED] INT 21h AH=4Ch -> ExitProcess")
-                output.append("    invoke ExitProcess, 0")
-            elif "3Dh" in trimmed:
-                output.append("    ; [CONVERTED] INT 21h AH=3Dh -> CreateFileA")
-                output.append("    invoke CreateFileA, ADDR filename, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL")
-            elif "3Fh" in trimmed:
-                output.append("    ; [CONVERTED] INT 21h AH=3Fh -> ReadFile")
-                output.append("    invoke ReadFile, ebx, ADDR buffer, 100, ADDR bytesRead, NULL")
-            elif "40h" in trimmed:
-                output.append("    ; [CONVERTED] INT 21h AH=40h -> WriteFile")
-                output.append("    invoke WriteFile, ebx, ADDR buffer, 100, ADDR bytesWritten, NULL")
-            elif "3Eh" in trimmed:
-                output.append("    ; [CONVERTED] INT 21h AH=3Eh -> CloseHandle")
-                output.append("    invoke CloseHandle, ebx")
-            else:
-                output.append("    ; MANUAL_REVIEW_REQUIRED: " + trimmed)
-        elif "in al," in trimmed.lower():
-            output.append("    ; [SCADA] Port I/O detecte")
-            output.append("    ; MANUAL_REVIEW_REQUIRED: " + trimmed)
-        elif "out " in trimmed.lower():
-            output.append("    ; [SCADA] Port I/O detecte")
-            output.append("    ; MANUAL_REVIEW_REQUIRED: " + trimmed)
-        elif any(d in trimmed for d in [".MODEL", ".STACK", ".CODE", ".DATA", "END"]):
-            output.append("    ; [REMOVED] " + trimmed)
-        elif any(r in trimmed for r in ["AX", "BX", "CX", "DX", "SI", "DI", "BP", "SP"]) and "EAX" not in trimmed:
-            converted = trimmed
-            converted = converted.replace("AX", "EAX").replace("BX", "EBX")
-            converted = converted.replace("CX", "ECX").replace("DX", "EDX")
-            converted = converted.replace("SI", "ESI").replace("DI", "EDI")
-            converted = converted.replace("BP", "EBP").replace("SP", "ESP")
-            output.append("    " + converted)
-        else:
-            output.append("    " + trimmed)
-
-    output.append("")
-    output.append("    invoke ExitProcess, 0")
-    output.append("main ENDP")
-    output.append("END main")
-
-    return "\n".join(output)
-
-def count_transformations(source: str) -> int:
-    """Compte les transformations appliquees"""
-    count = 0
-    if "int 21h" in source.lower():
-        count += source.lower().count("int 21h")
-    if any(r in source for r in ["AX", "BX", "CX", "DX"]):
-        count += 1
-    return count
-
-def count_manual_reviews(converted: str) -> int:
-    """Compte les reviews manuelles requises"""
-    return converted.count("MANUAL_REVIEW_REQUIRED")
+# (Les fonctions convert_asm, count_transformations, count_manual_reviews
+#  sont définies en haut du fichier, avant st.set_page_config)
